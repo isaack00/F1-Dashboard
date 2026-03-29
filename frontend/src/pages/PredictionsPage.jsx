@@ -1,103 +1,114 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import DashboardCard from '../components/layout/DashboardCard';
 import GPSSelector from '../components/shared/GPSSelector';
 import SyncStatus from '../components/layout/SyncStatus';
+import fastf1Api from '../services/api';
+
+// Map EventName to short display name - use country/circuit consistently (no country+city mix)
+function toDisplayName(raceName) {
+  if (!raceName) return '';
+  // Prefer country/circuit names F1 commonly uses
+  if (raceName.includes('Australian')) return 'Australia';
+  if (raceName.includes('Chinese')) return 'China';
+  if (raceName.includes('Japanese')) return 'Japan';
+  if (raceName.includes('Bahrain')) return 'Bahrain';
+  if (raceName.includes('Saudi Arabian')) return 'Saudi Arabia';
+  if (raceName.includes('Miami')) return 'Miami';
+  if (raceName.includes('Emilia Romagna')) return 'Emilia Romagna';
+  if (raceName.includes('Monaco')) return 'Monaco';
+  if (raceName.includes('Barcelona')) return 'Barcelona';  // Barcelona GP
+  if (raceName.includes('Spanish')) return 'Madrid';       // Spanish GP (Madrid)
+  if (raceName.includes('Canadian')) return 'Canada';
+  if (raceName.includes('Austrian')) return 'Austria';
+  if (raceName.includes('British')) return 'Great Britain';
+  if (raceName.includes('Belgian')) return 'Belgium';
+  if (raceName.includes('Hungarian')) return 'Hungary';
+  if (raceName.includes('Dutch')) return 'Netherlands';
+  if (raceName.includes('Italian')) return 'Italy';
+  if (raceName.includes('Azerbaijan')) return 'Azerbaijan';
+  if (raceName.includes('Singapore')) return 'Singapore';
+  if (raceName.includes('United States') && !raceName.includes('Miami') && !raceName.includes('Las Vegas')) return 'Austin';
+  if (raceName.includes('Mexico City')) return 'Mexico';
+  if (raceName.includes('São Paulo')) return 'Brazil';
+  if (raceName.includes('Las Vegas')) return 'Las Vegas';
+  if (raceName.includes('Qatar')) return 'Qatar';
+  if (raceName.includes('Abu Dhabi')) return 'Abu Dhabi';
+  return raceName.replace(/ Grand Prix$/, '');
+}
+
+const currentYear = new Date().getFullYear();
 
 export default function PredictionsPage() {
   const navigate = useNavigate();
   const [predictions, setPredictions] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [selectedRace, setSelectedRace] = useState('');
-  const [availableRaces, setAvailableRaces] = useState([]);
+  const [selectedYear] = useState(currentYear);
+  const [selectedRace, setSelectedRace] = useState(''); // API name (full EventName)
+  const [availableRaces, setAvailableRaces] = useState([]); // [{ displayName, apiName }]
   const [checkingRaces, setCheckingRaces] = useState(true);
   const [showErrorPopup, setShowErrorPopup] = useState(false);
 
-  // === 🧩 Fetch races that actually have qualifying data in DB ===
-  const fetchRaceCalendar = async () => {
+  const fetchRaceCalendar = async (year) => {
     try {
-      const response = await fetch(`http://127.0.0.1:5001/api/available_races/2025`);
-      if (!response.ok) throw new Error('Failed to fetch available races');
-      const data = await response.json();
-
-      // Map names to simplified GP format for frontend consistency
-      const calendar = data.map((raceName) => {
-        let predictionName = raceName;
-        if (raceName.includes('Australian')) predictionName = 'Australia';
-        else if (raceName.includes('Chinese')) predictionName = 'China';
-        else if (raceName.includes('Japanese')) predictionName = 'Japan';
-        else if (raceName.includes('Bahrain')) predictionName = 'Bahrain';
-        else if (raceName.includes('Saudi Arabian')) predictionName = 'Saudi Arabia';
-        else if (raceName.includes('Miami')) predictionName = 'Miami';
-        else if (raceName.includes('Emilia Romagna')) predictionName = 'Emilia Romagna';
-        else if (raceName.includes('Monaco')) predictionName = 'Monaco';
-        else if (raceName.includes('Spanish')) predictionName = 'Spain';
-        else if (raceName.includes('Canadian')) predictionName = 'Canada';
-        else if (raceName.includes('Austrian')) predictionName = 'Austria';
-        else if (raceName.includes('British')) predictionName = 'Great Britain';
-        else if (raceName.includes('Belgian')) predictionName = 'Belgium';
-        else if (raceName.includes('Hungarian')) predictionName = 'Hungary';
-        else if (raceName.includes('Dutch')) predictionName = 'Netherlands';
-        else if (raceName.includes('Italian')) predictionName = 'Italy';
-        else if (raceName.includes('Azerbaijan')) predictionName = 'Azerbaijan';
-        else if (raceName.includes('Singapore')) predictionName = 'Singapore';
-        else if (raceName.includes('United States') && !raceName.includes('Miami')) predictionName = 'United States';
-        else if (raceName.includes('Mexico City')) predictionName = 'Mexico';
-        else if (raceName.includes('São Paulo')) predictionName = 'Brazil';
-        else if (raceName.includes('Las Vegas')) predictionName = 'United States';
-        else if (raceName.includes('Qatar')) predictionName = 'Qatar';
-        else if (raceName.includes('Abu Dhabi')) predictionName = 'Abu Dhabi';
-        return { name: predictionName, raceName };
-      });
-
-      return calendar;
+      const data = await fastf1Api.getAvailableRaces(year);
+      if (!Array.isArray(data)) return [];
+      // Only use EventName format (contains "Grand Prix"); filter out Location/Country if backend returns them
+      const eventNamesOnly = data.filter((name) => name && String(name).includes('Grand Prix'));
+      const mapped = eventNamesOnly.map((apiName) => ({
+        displayName: toDisplayName(apiName),
+        apiName,
+      }));
+      // Deduplicate by displayName; prefer EventName (contains "Grand Prix") for API calls
+      const byDisplay = new Map();
+      for (const r of mapped) {
+        const key = r.displayName?.trim() || '';
+        if (!key) continue;
+        const existing = byDisplay.get(key);
+        const isEventName = r.apiName?.includes('Grand Prix');
+        if (!existing || (isEventName && !existing.apiName?.includes('Grand Prix'))) {
+          byDisplay.set(key, r);
+        }
+      }
+      return Array.from(byDisplay.values());
     } catch (err) {
       console.error('Error fetching race calendar:', err);
       return [];
     }
   };
 
-  // === 🧩 Fetch predictions from backend ===
-  const fetchPredictions = async () => {
+  const fetchPredictions = useCallback(async () => {
     if (!selectedRace) return;
     try {
       setLoading(true);
       setError(null);
-      const response = await fetch(
-        `http://127.0.0.1:5001/api/race_predict?year=2025&gp_name=${encodeURIComponent(selectedRace)}`
-      );
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json();
+      const data = await fastf1Api.getRacePrediction(selectedYear, selectedRace);
       setPredictions(data);
     } catch (err) {
       console.error('Error fetching predictions:', err);
-      setError(err.message);
+      setError(err.message || err.response?.data?.error);
       setShowErrorPopup(true);
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedYear, selectedRace]);
 
-  // === 🧩 Load available races once ===
+  // Load available races when year changes
   useEffect(() => {
-    const loadRaceCalendar = async () => {
-      const calendar = await fetchRaceCalendar();
-      const available = calendar.map(r => r.name);
-      setAvailableRaces(available);
+    setCheckingRaces(true);
+    fetchRaceCalendar(selectedYear).then((calendar) => {
+      setAvailableRaces(calendar);
       setCheckingRaces(false);
+      if (calendar.length > 0) setSelectedRace(calendar[0].apiName);
+      else setSelectedRace('');
+    });
+  }, [selectedYear]);
 
-      if (available.length > 0) setSelectedRace(available[0]);
-    };
-    loadRaceCalendar();
-  }, []);
-
-  // === 🧩 Fetch predictions when selection changes ===
+  // Fetch predictions when race selection changes
   useEffect(() => {
-    if (availableRaces.length > 0 && selectedRace) {
-      fetchPredictions();
-    }
-  }, [selectedRace, availableRaces]);
+    if (availableRaces.length > 0 && selectedRace) fetchPredictions();
+  }, [selectedRace, availableRaces, fetchPredictions]);
 
   // === UI states ===
   if (checkingRaces) {
@@ -117,7 +128,7 @@ export default function PredictionsPage() {
         <h1 className="text-4xl font-bold mb-4 text-white bg-gradient-to-r from-blue-400 via-purple-500 to-red-500 bg-clip-text text-transparent">
           Race Predictions
         </h1>
-        <p className="text-lg text-white/70">No 2025 races with qualifying data yet.</p>
+        <p className="text-lg text-white/70">No races found for {selectedYear}.</p>
       </div>
     );
   }
@@ -177,16 +188,19 @@ export default function PredictionsPage() {
         {/* Race selector */}
         <div className="mb-8">
           <GPSSelector
-            selectedGP={selectedRace}
-            setSelectedGP={setSelectedRace}
-            availableGPs={availableRaces}
+            selectedGP={availableRaces.find((r) => r.apiName === selectedRace)?.displayName ?? ''}
+            setSelectedGP={(displayName) => {
+              const r = availableRaces.find((x) => x.displayName === displayName);
+              if (r) setSelectedRace(r.apiName);
+            }}
+            availableGPs={availableRaces.map((r) => r.displayName)}
             loading={loading}
           />
         </div>
 
         {/* Prediction table */}
         {predictions && (
-          <DashboardCard title={`2025 ${selectedRace} GP - Race Predictions`}>
+          <DashboardCard title={`${selectedYear} ${availableRaces.find((r) => r.apiName === selectedRace)?.displayName ?? selectedRace} GP - Race Predictions`}>
             <div className="overflow-x-auto max-h-[32rem] overflow-y-auto custom-scrollbar">
               <table className="min-w-full text-sm">
                 <thead>
